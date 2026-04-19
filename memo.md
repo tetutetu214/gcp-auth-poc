@@ -76,6 +76,15 @@ gcloud services enable \
   certificatemanager.googleapis.com
 ```
 
+### 1-3. Private Google Access 有効化
+
+```bash
+# Cloud Run 間の内部通信に必要（Direct VPC egress 経由で Google サービスにアクセスするため）
+gcloud compute networks subnets update default \
+  --region=asia-northeast1 \
+  --enable-private-ip-google-access
+```
+
 ---
 
 ## Step2. GCS バケット作成
@@ -472,9 +481,16 @@ gcloud run deploy poc-frontend \
   --service-account=poc-frontend-sa@${PROJECT_ID}.iam.gserviceaccount.com \
   --set-env-vars=BACKEND_URL=${BACKEND_URL} \
   --ingress=internal-and-cloud-load-balancing \
+  --network=default \
+  --subnet=default \
+  --vpc-egress=all-traffic \
   --max-instances=3 \
   --no-allow-unauthenticated \
   --port=8080
+
+# ※ --network/--subnet/--vpc-egress は Direct VPC egress の設定。
+#    バックエンド(ingress=internal)への内部通信に必要。
+#    Step1-3 で Private Google Access を有効化済みであること。
 ```
 
 ---

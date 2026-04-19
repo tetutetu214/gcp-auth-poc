@@ -30,3 +30,21 @@
 - Entra ID の「認証」→「プラットフォームを追加」→「Web」の画面で、リダイレクトURIが空だと保存できない
 - IDトークンの有効化はこのプラットフォーム追加画面内で行うため、プラットフォーム追加をスキップできない
 - 対処: 仮の値 `https://localhost` を設定し、Phase 5（Step 11）で Identity Platform のコールバックURLに差し替える
+
+### 2026-04-19: IAP + 外部ID 利用時のコールバックURLは firebaseapp.com ではない
+
+- Identity Platform のプロバイダ設定画面には `https://{PROJECT_ID}.firebaseapp.com/__/auth/handler` が表示される
+- しかし IAP が外部IDを使う構成では、IAP が自動作成した認証ページ用 Cloud Run のURLがコールバックURLとして使われる
+- 実際のURL形式: `https://iap-gcip-hosted-ui-{バックエンドサービス名}-{ランダム}.a.run.app/__/auth/handler`
+- Entra ID のリダイレクトURIには firebaseapp.com ではなく、IAP が生成した Cloud Run のURLを登録すること
+- エラーメッセージ: `AADSTS50011: The redirect URI ... does not match the redirect URIs configured`
+
+### 2026-04-19: Cloud Run 間の内部通信には Private Google Access が必要
+
+- Cloud Run はデフォルトではVPCの外に存在するサーバーレスサービス
+- Cloud Run 同士で `ingress=internal` を使った内部通信をするには、以下の3つが必要:
+  1. 呼び出し元に Direct VPC egress を設定（`--network`, `--subnet`, `--vpc-egress=all-traffic`）
+  2. 対象サブネットの **Private Google Access を有効化**（`gcloud compute networks subnets update --enable-private-ip-google-access`）
+  3. 呼び出し先の `ingress=internal` はそのまま
+- Private Google Access が無効だと `ETIMEDOUT` エラーになる（VPC内から Google サービスにアクセスできない）
+- Private Google Access の有効化に追加コストはかからない
