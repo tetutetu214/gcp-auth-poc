@@ -1,4 +1,6 @@
 """/api/graph/* のFastAPIルーター"""
+import base64
+import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -43,6 +45,40 @@ def _extract_user_email(raw: str | None) -> str:
     return raw
 
 
+def _extract_email_from_iap_jwt(jwt_token: str | None) -> str:
+    """IAP JWT（X-Goog-IAP-JWT-Assertion）から email クレームを取り出す
+
+    ※ PoC用途のため署名検証は省略。本番では google-auth 等で検証すること。
+    外部ID（Identity Platform 経由の Entra ID）使用時は、メアドヘッダの代わりに
+    このJWT経由でユーザー識別することが多い。
+    """
+    if not jwt_token:
+        return ""
+    try:
+        parts = jwt_token.split(".")
+        if len(parts) != 3:
+            return ""
+        # base64url デコード（パディング補正）
+        payload = parts[1]
+        padding = "=" * (4 - len(payload) % 4)
+        decoded = base64.urlsafe_b64decode(payload + padding)
+        claims = json.loads(decoded)
+        return claims.get("email", "")
+    except (ValueError, json.JSONDecodeError):
+        return ""
+
+
+def _resolve_user_email(
+    email_header: str | None,
+    jwt_header: str | None,
+) -> str:
+    """利用可能な複数のIAPヘッダから user email を解決する"""
+    from_header = _extract_user_email(email_header)
+    if from_header:
+        return from_header
+    return _extract_email_from_iap_jwt(jwt_header)
+
+
 def build_router(deps: GraphDeps) -> APIRouter:
     """GraphDepsを束縛したAPIRouterを返す"""
     router = APIRouter()
@@ -50,9 +86,11 @@ def build_router(deps: GraphDeps) -> APIRouter:
     @router.get("/api/graph/sync")
     async def sync(
         x_goog_authenticated_user_email: str | None = Header(default=None),
+        x_goog_iap_jwt_assertion: str | None = Header(default=None),
     ) -> Response:
-        user_email = _extract_user_email(
-            x_goog_authenticated_user_email
+        user_email = _resolve_user_email(
+            x_goog_authenticated_user_email,
+            x_goog_iap_jwt_assertion,
         )
         record = (
             load_token(deps.firestore_client, user_email)
@@ -130,10 +168,12 @@ def build_router(deps: GraphDeps) -> APIRouter:
         x_goog_authenticated_user_email: str | None = Header(
             default=None
         ),
+        x_goog_iap_jwt_assertion: str | None = Header(default=None),
     ) -> Response:
         """Entra IDからの認可コールバック。state検証→トークン交換→Firestore保存"""
-        user_email = _extract_user_email(
-            x_goog_authenticated_user_email
+        user_email = _resolve_user_email(
+            x_goog_authenticated_user_email,
+            x_goog_iap_jwt_assertion,
         )
         cookie_state = request.cookies.get(STATE_COOKIE_NAME)
 

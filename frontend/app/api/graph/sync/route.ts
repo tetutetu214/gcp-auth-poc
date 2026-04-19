@@ -3,10 +3,12 @@ import { NextRequest, NextResponse } from "next/server";
 const BACKEND_URL = process.env.BACKEND_URL;
 
 export async function GET(req: NextRequest) {
-  // IAPが注入するユーザー識別ヘッダ・state Cookieをバックエンドに中継
+  // IAPが注入するユーザー識別ヘッダ・JWT・state Cookieをバックエンドに中継
   const forwardHeaders: Record<string, string> = {};
   const email = req.headers.get("x-goog-authenticated-user-email");
   if (email) forwardHeaders["x-goog-authenticated-user-email"] = email;
+  const jwt = req.headers.get("x-goog-iap-jwt-assertion");
+  if (jwt) forwardHeaders["x-goog-iap-jwt-assertion"] = jwt;
   const cookie = req.headers.get("cookie");
   if (cookie) forwardHeaders["cookie"] = cookie;
 
