@@ -4,16 +4,19 @@ import { useState } from "react";
 
 export default function Home() {
   const [file, setFile] = useState<File | null>(null);
-  const [message, setMessage] = useState<string>("");
-  const [loading, setLoading] = useState<boolean>(false);
+  const [uploadMessage, setUploadMessage] = useState<string>("");
+  const [uploadLoading, setUploadLoading] = useState<boolean>(false);
+
+  const [mailMessage, setMailMessage] = useState<string>("");
+  const [mailLoading, setMailLoading] = useState<boolean>(false);
 
   const handleUpload = async () => {
     if (!file) {
-      setMessage("ファイルを選択してください");
+      setUploadMessage("ファイルを選択してください");
       return;
     }
-    setLoading(true);
-    setMessage("");
+    setUploadLoading(true);
+    setUploadMessage("");
     const formData = new FormData();
     formData.append("file", file);
     try {
@@ -22,11 +25,34 @@ export default function Home() {
         body: formData,
       });
       const data = await res.json();
-      setMessage(data.message ?? JSON.stringify(data));
-    } catch (e) {
-      setMessage("エラーが発生しました");
+      setUploadMessage(data.message ?? JSON.stringify(data));
+    } catch {
+      setUploadMessage("エラーが発生しました");
     } finally {
-      setLoading(false);
+      setUploadLoading(false);
+    }
+  };
+
+  const handleFetchMail = async () => {
+    setMailLoading(true);
+    setMailMessage("");
+    try {
+      const res = await fetch("/api/graph/sync");
+      const data = await res.json();
+      if (data.status === "auth_required") {
+        // Entra ID の同意画面へ遷移
+        window.location.href = data.authorize_url;
+        return;
+      }
+      if (data.status === "ok") {
+        setMailMessage(`取得成功：${data.count}件 / ${data.gcs_path}`);
+      } else {
+        setMailMessage(`エラー：${JSON.stringify(data)}`);
+      }
+    } catch {
+      setMailMessage("通信エラーが発生しました");
+    } finally {
+      setMailLoading(false);
     }
   };
 
@@ -36,15 +62,22 @@ export default function Home() {
       <input
         type="file"
         accept="application/pdf"
-        onChange={(e) =>
-          setFile(e.target.files?.[0] ?? null)
-        }
+        onChange={(e) => setFile(e.target.files?.[0] ?? null)}
       />
       <br /><br />
-      <button onClick={handleUpload} disabled={loading}>
-        {loading ? "アップロード中..." : "アップロード"}
+      <button onClick={handleUpload} disabled={uploadLoading}>
+        {uploadLoading ? "アップロード中..." : "アップロード"}
       </button>
-      {message && <p>{message}</p>}
+      {uploadMessage && <p>{uploadMessage}</p>}
+
+      <hr style={{ margin: "2rem 0" }} />
+
+      <h2>メール取得 PoC</h2>
+      <p>Microsoft Graph API で自分の最新メール10件を取得し、GCSに保存します。</p>
+      <button onClick={handleFetchMail} disabled={mailLoading}>
+        {mailLoading ? "取得中..." : "メールを取得"}
+      </button>
+      {mailMessage && <p>{mailMessage}</p>}
     </main>
   );
 }
