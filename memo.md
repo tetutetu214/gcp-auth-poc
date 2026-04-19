@@ -232,7 +232,7 @@ gcloud run deploy poc-backend \
 
 # ※ --allow-unauthenticated だが、--ingress=internal により
 #    外部からのアクセスは完全ブロックされる。
-#    フロントエンド(Next.js)からの内部通信のみ受け付ける（BFFパターン）。
+#    フロントエンド(Next.js)からの内部通信のみ受け付ける（3層構成）。
 
 # バックエンドの URL を変数に保存
 BACKEND_URL=$(gcloud run services describe poc-backend \
@@ -555,7 +555,7 @@ gcloud certificate-manager certificates describe poc-cert
 ### 7-1. Serverless NEG 作成
 
 ```bash
-# フロントエンド用 NEG のみ作成（BFFパターン）
+# フロントエンド用 NEG のみ作成（3層構成）
 # バックエンドはフロントエンド(Next.js)経由で内部通信するため NEG 不要
 gcloud compute network-endpoint-groups create poc-frontend-neg \
   --region=asia-northeast1 \
@@ -566,7 +566,7 @@ gcloud compute network-endpoint-groups create poc-frontend-neg \
 ### 7-2. バックエンドサービス作成
 
 ```bash
-# フロントエンド用のみ（BFFパターン）
+# フロントエンド用のみ（3層構成）
 # LB からはフロントエンドだけに振り分ける
 gcloud compute backend-services create poc-frontend-bs \
   --load-balancing-scheme=EXTERNAL_MANAGED \
@@ -581,7 +581,7 @@ gcloud compute backend-services add-backend poc-frontend-bs \
 ### 7-3. URL マップ作成
 
 ```bash
-# 全パスをフロントエンドに振り分け（BFFパターン）
+# 全パスをフロントエンドに振り分け（3層構成）
 # /api/* へのリクエストも一度フロントエンド(Next.js)が受け取り、
 # Next.js API Route がバックエンド(FastAPI)に内部通信で中継する
 gcloud compute url-maps create poc-url-map \
@@ -878,10 +878,10 @@ gcloud compute target-https-proxies delete poc-https-proxy -q
 # URL マップ
 gcloud compute url-maps delete poc-url-map --global -q
 
-# バックエンドサービス（BFFパターンのためフロントエンドのみ）
+# バックエンドサービス（3層構成のためフロントエンドのみ）
 gcloud compute backend-services delete poc-frontend-bs --global -q
 
-# Serverless NEG（BFFパターンのためフロントエンドのみ）
+# Serverless NEG（3層構成のためフロントエンドのみ）
 gcloud compute network-endpoint-groups delete poc-frontend-neg \
   --region=asia-northeast1 -q
 

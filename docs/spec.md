@@ -133,7 +133,7 @@ PDFファイルをGCSにアップロードする。
 | --- | --- |
 | スキーム | EXTERNAL_MANAGED |
 | IPバージョン | IPv4（PREMIUM ネットワークティア） |
-| URLマップ | `/*` → poc-frontend-bs（BFFパターン：全パスをフロントエンドに振り分け） |
+| URLマップ | `/*` → poc-frontend-bs（3層構成：全パスをフロントエンドに振り分け、Next.jsがバックエンドに中継） |
 | SSL | Googleマネージド証明書（DNS認証） |
 
 ### Artifact Registry

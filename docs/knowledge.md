@@ -9,12 +9,13 @@
 - Azure環境は未構築。アカウント作成から必要（Phase 1 として最初に実施）
 - Azure無料アカウントにはクレジットカード登録が必要だが、Entra IDはFree枠に含まれる
 
-### 2026-04-19: BFFパターンへの設計変更
+### 2026-04-19: 3層構成への設計変更
 - 当初の memo.md ではLBのパスルーティング（`/api/*` → バックエンド）で構成していた
-- 今後 Gemini 呼び出し、Outlook メール取得など FastAPI の機能が拡充する予定があるため、BFFパターンに変更
-- BFFパターン: LBは全パスをフロントエンド(Next.js)に振り分け、Next.js API Route がバックエンドに内部通信で中継
+- 今後 Gemini 呼び出し、Outlook メール取得など FastAPI の機能が拡充する予定があるため、LBからは全パスをフロントエンドに振り分ける構成に変更
+- 構成: LB → フロントエンド(Next.js) → バックエンド(FastAPI) の3層アーキテクチャ。Next.js API Route がバックエンドへのプロキシ（集約層）として機能
 - これにより機能追加時にLBの設定変更が不要になる（route.ts の追加だけで済む）
 - バックエンドCloud Runは `--allow-unauthenticated` + `--ingress=internal` に変更（内部通信のみ受付）
+- **注意: この構成は「BFF（Backend For Frontend）」ではない。** BFFは「クライアント種別ごとに専用バックエンドを用意する」パターンであり、フロントエンドが1つの場合は該当しない（Microsoft Learn、Sam Newman氏の定義に基づく）
 
 ## 注意事項（memo.md から抽出）
 
