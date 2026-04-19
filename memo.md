@@ -869,6 +869,254 @@ gcloud storage ls gs://${BUCKET_NAME}/uploads/
 
 ---
 
+# Phase 7. Microsoft Graph API によるメール取得機能の追加
+
+> 既存PoC（Step1〜12）が完了している前提。ここからは Graph API で delegated アクセストークンを取得し、`/me/messages` を呼び出してメール10件を GCS に保存する機能を追加する。
+>
+> 概要：
+> - 追加リソース：Secret Manager（1シークレット）、Firestore（Native モード、1 DB）
+> - 既存リソースへの変更：Entra ID アプリへの権限・リダイレクトURI追加、`poc-backend-sa` への IAM 追加、FastAPI/Next.js の再デプロイ
+> - 新規エンドポイント：`/api/graph/sync`、`/api/graph/callback`（どちらも FastAPI 実処理、Next.js はプロキシ）
+
+## Step14. Azure: Entra ID アプリに Graph 権限とリダイレクト URI を追加
+
+> 既存の `poc-gcp-oidc` アプリを**流用**する（新規アプリは作らない）。
+
+### 14-1. API のアクセス許可を追加
+
+1. https://entra.microsoft.com にアクセス
+2. 「アプリの登録」→ 既存の `poc-gcp-oidc` を選択
+3. 左メニュー「API のアクセス許可」→「アクセス許可の追加」
+4. 「Microsoft Graph」→「委任されたアクセス許可」を選択
+5. 以下を検索・選択してチェックを入れる：
+   - `Mail.Read`
+   - `offline_access`
+6. 「アクセス許可の追加」をクリック
+
+> 注：`openid` `profile` `email` は既存の Entra ID 設定で既に有効なので追加不要。個人アカウントなら管理者同意も不要（ユーザー同意で通る）。
+
+### 14-2. リダイレクト URI を追加
+
+1. `poc-gcp-oidc` の「認証」メニューを開く
+2. 「Web」プラットフォームに以下の URI を**追加**（既存の IAP 用 URI は削除しない）：
+   ```
+   https://poc.tetutetu214.com/api/graph/callback
+   ```
+3. 「保存」
+
+### 14-3. クライアントシークレットの確認
+
+Phase 1 で取得した既存のクライアントシークレットを**流用**する。秘密値を保管しているローカルの `.env` 等から値をコピーしておく（次の Step15 で Secret Manager に登録）。
+
+> 失くした場合は「証明書とシークレット」→ 新規シークレット発行。ただし Identity Platform にも同じシークレットが登録されているため、新規発行した場合は Identity Platform のプロバイダ設定にも反映する必要がある点に注意。
+
+---
+
+## Step15. GCP: Secret Manager にクライアントシークレットを保存
+
+### 15-1. API 有効化
+
+```bash
+gcloud services enable secretmanager.googleapis.com
+```
+
+### 15-2. シークレット作成
+
+```bash
+# 値はコマンドラインに出さず、ファイル経由で渡す
+# （一時ファイルを使う／使い終わったら必ず削除する）
+CLIENT_SECRET_FILE=$(mktemp)
+read -rsp "Entra ID クライアントシークレットを貼り付け: " CLIENT_SECRET_VALUE
+echo
+printf '%s' "${CLIENT_SECRET_VALUE}" > "${CLIENT_SECRET_FILE}"
+
+gcloud secrets create poc-entra-client-secret \
+  --replication-policy=automatic \
+  --data-file="${CLIENT_SECRET_FILE}"
+
+rm "${CLIENT_SECRET_FILE}"
+unset CLIENT_SECRET_VALUE
+```
+
+### 15-3. バックエンドSA にアクセス権付与
+
+```bash
+PROJECT_ID=$(gcloud config get-value project)
+
+gcloud secrets add-iam-policy-binding poc-entra-client-secret \
+  --member="serviceAccount:poc-backend-sa@${PROJECT_ID}.iam.gserviceaccount.com" \
+  --role="roles/secretmanager.secretAccessor"
+```
+
+---
+
+## Step16. GCP: Firestore データベース作成
+
+### 16-1. API 有効化
+
+```bash
+gcloud services enable firestore.googleapis.com
+```
+
+### 16-2. データベース作成（Native mode）
+
+```bash
+gcloud firestore databases create \
+  --location=asia-northeast1 \
+  --type=firestore-native
+```
+
+> 注：1プロジェクトに `(default)` データベースは1つだけ。既に別モードで作成済みの場合は作り直し不可（データが入っていなければ削除→再作成は可能）。
+
+### 16-3. バックエンドSA に Firestore アクセス権付与
+
+```bash
+PROJECT_ID=$(gcloud config get-value project)
+
+gcloud projects add-iam-policy-binding ${PROJECT_ID} \
+  --member="serviceAccount:poc-backend-sa@${PROJECT_ID}.iam.gserviceaccount.com" \
+  --role="roles/datastore.user"
+```
+
+> `roles/datastore.user` は Firestore Native mode でも有効（権限名は Datastore 由来の歴史的経緯）。
+
+---
+
+## Step17. バックエンド（FastAPI）の更新・再デプロイ
+
+### 17-1. 依存パッケージ追加
+
+`backend/requirements.txt` に以下を追記：
+
+```
+google-cloud-firestore==2.18.0
+google-cloud-secret-manager==2.20.0
+httpx==0.27.0
+```
+
+### 17-2. アプリコード追加
+
+`backend/main.py` に以下を追加実装（詳細は設計書 `docs/superpowers/specs/2026-04-19-graph-api-mail-design.md` を参照）：
+
+- `GET /api/graph/sync` — トークン有無で分岐
+- `GET /api/graph/callback` — 認可コードをトークンに交換して Firestore 保存
+- 環境変数：`ENTRA_TENANT_ID`、`ENTRA_CLIENT_ID`、`ENTRA_CLIENT_SECRET`（Secret Manager由来）、`REDIRECT_URI`
+
+### 17-3. Docker ビルド & Artifact Registry プッシュ
+
+```bash
+PROJECT_ID=$(gcloud config get-value project)
+
+cd backend
+gcloud builds submit \
+  --tag asia-northeast1-docker.pkg.dev/${PROJECT_ID}/poc-repo/backend:graph-v1 \
+  .
+cd ..
+```
+
+### 17-4. Cloud Run 再デプロイ（環境変数 + Secret Manager 参照を追加）
+
+```bash
+PROJECT_ID=$(gcloud config get-value project)
+BUCKET_NAME="poc-upload-${PROJECT_ID}"
+ENTRA_TENANT_ID="<Entra IDテナントID>"
+ENTRA_CLIENT_ID="<Entra IDクライアントID>"
+
+gcloud run deploy poc-backend \
+  --image=asia-northeast1-docker.pkg.dev/${PROJECT_ID}/poc-repo/backend:graph-v1 \
+  --region=asia-northeast1 \
+  --service-account=poc-backend-sa@${PROJECT_ID}.iam.gserviceaccount.com \
+  --ingress=internal \
+  --no-allow-unauthenticated \
+  --max-instances=3 \
+  --set-env-vars=BUCKET_NAME=${BUCKET_NAME},ENTRA_TENANT_ID=${ENTRA_TENANT_ID},ENTRA_CLIENT_ID=${ENTRA_CLIENT_ID},REDIRECT_URI=https://poc.tetutetu214.com/api/graph/callback \
+  --set-secrets=ENTRA_CLIENT_SECRET=poc-entra-client-secret:latest
+```
+
+> `--set-secrets` の書式は `環境変数名=シークレット名:バージョン`。`latest` を指定するとローテーション時に再デプロイ不要になる。
+
+---
+
+## Step18. フロントエンド（Next.js）の更新・再デプロイ
+
+### 18-1. UI にボタン追加
+
+`frontend/app/page.tsx` に「メール取得」ボタンと取得結果表示エリアを追加。クリック時は `GET /api/graph/sync` を呼び、レスポンスが `{status: "auth_required", authorize_url: ...}` なら `window.location.href = authorize_url` で遷移する。
+
+### 18-2. プロキシ Route の追加
+
+- `frontend/app/api/graph/sync/route.ts` — GET を受けて FastAPI の `/api/graph/sync` へフォワード
+- `frontend/app/api/graph/callback/route.ts` — GET を受けて `code` と `state` を FastAPI の `/api/graph/callback` へフォワード
+
+### 18-3. Docker ビルド & 再デプロイ
+
+```bash
+PROJECT_ID=$(gcloud config get-value project)
+
+cd frontend
+gcloud builds submit \
+  --tag asia-northeast1-docker.pkg.dev/${PROJECT_ID}/poc-repo/frontend:graph-v1 \
+  .
+cd ..
+
+# 既存の BACKEND_URL 等を引き継いで再デプロイ
+gcloud run deploy poc-frontend \
+  --image=asia-northeast1-docker.pkg.dev/${PROJECT_ID}/poc-repo/frontend:graph-v1 \
+  --region=asia-northeast1 \
+  --service-account=poc-frontend-sa@${PROJECT_ID}.iam.gserviceaccount.com \
+  --ingress=internal-and-cloud-load-balancing \
+  --no-allow-unauthenticated \
+  --max-instances=3 \
+  --network=default \
+  --subnet=default \
+  --vpc-egress=all-traffic \
+  --set-env-vars=BACKEND_URL=<既存のバックエンドURL>
+```
+
+---
+
+## Step19. Graph API 機能の動作確認
+
+### 19-1. 初回アクセス（認可フロー）
+
+1. ブラウザで `https://poc.tetutetu214.com` にアクセス（既に IAP 通過済みの状態）
+2. 「メール取得」ボタンをクリック
+3. Entra ID の**同意画面**が表示されることを確認（`Mail.Read` が要求権限に含まれる）
+4. 「承諾」をクリック
+5. `/` に戻ってくることを確認
+
+### 19-2. 2回目以降（同意なしで取得）
+
+1. もう一度「メール取得」ボタンをクリック
+2. 同意画面なしでそのまま取得され、以下が返ってくることを確認：
+   ```json
+   {"status": "ok", "count": 10, "gcs_path": "gs://poc-upload-.../mails/.../..."}
+   ```
+
+### 19-3. Firestore の中身確認
+
+```bash
+# GCPコンソールで確認するのが最速
+# https://console.cloud.google.com/firestore/databases/-default-/data
+# graph_tokens コレクション配下にユーザーメアドのドキュメントがあるはず
+```
+
+### 19-4. GCS の中身確認
+
+```bash
+PROJECT_ID=$(gcloud config get-value project)
+gcloud storage ls gs://poc-upload-${PROJECT_ID}/mails/
+gcloud storage cat gs://poc-upload-${PROJECT_ID}/mails/<user-email>/<timestamp>.json | head -50
+```
+
+### 19-5. リフレッシュ動作の確認（任意）
+
+- Firestore のドキュメント内 `expires_at` を過去日時に手動で書き換え
+- 再度ボタンを押し、裏でリフレッシュされて成功することを確認
+- Firestore の `access_token` と `expires_at` が更新されていることを確認
+
+---
+
 ## Step13. リソース削除手順
 
 > **LB から順番に削除すること。**
@@ -957,19 +1205,39 @@ gcloud iam service-accounts delete \
   poc-frontend-sa@${PROJECT_ID}.iam.gserviceaccount.com -q
 ```
 
-### 13-7. Azure: Entra ID アプリ削除
+### 13-7. Graph 機能関連リソース削除（Phase 7 を実施した場合のみ）
+
+```bash
+# Secret Manager シークレット
+gcloud secrets delete poc-entra-client-secret -q
+
+# Firestore データベース（中のデータも消える）
+# ※ 完全削除は GCP コンソールからのみ可能
+#   https://console.cloud.google.com/firestore/databases
+#   -default- データベースを選択 →「データベースを削除」
+# CLIでドキュメントだけ消したい場合は：
+# gcloud firestore databases delete projects/${PROJECT_ID}/databases/(default)
+
+# GCS 上の mails/ プレフィックスだけ削除したい場合（バケット自体は 13-5 で削除）
+PROJECT_ID=$(gcloud config get-value project)
+gcloud storage rm -r gs://poc-upload-${PROJECT_ID}/mails/
+```
+
+> Entra ID アプリを残して再利用する場合は、「API のアクセス許可」から `Mail.Read` `offline_access` を削除、「認証」からリダイレクトURI `https://poc.tetutetu214.com/api/graph/callback` を削除する。アプリ自体を削除する場合は 13-8 に進む。
+
+### 13-8. Azure: Entra ID アプリ削除
 
 1. https://entra.microsoft.com →「アプリの登録」
 2. `poc-gcp-oidc` を選択 →「削除」
 
-### 13-8. Cloudflare: DNS レコード削除
+### 13-9. Cloudflare: DNS レコード削除
 
 1. Cloudflare ダッシュボード → `tetutetu214.com` → DNS
 2. 以下のレコードを削除:
    - `_acme-challenge.poc` （CNAME）
    - `poc` （A レコード）
 
-### 13-9. 削除確認
+### 13-10. 削除確認
 
 ```bash
 # Cloud Run 確認（何も表示されなければ OK）
