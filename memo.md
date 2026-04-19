@@ -227,8 +227,12 @@ gcloud run deploy poc-backend \
   --set-env-vars=BUCKET_NAME=${BUCKET_NAME} \
   --ingress=internal \
   --max-instances=3 \
-  --no-allow-unauthenticated \
+  --allow-unauthenticated \
   --port=8080
+
+# ※ --allow-unauthenticated だが、--ingress=internal により
+#    外部からのアクセスは完全ブロックされる。
+#    フロントエンド(Next.js)からの内部通信のみ受け付ける（BFFパターン）。
 
 # バックエンドの URL を変数に保存
 BACKEND_URL=$(gcloud run services describe poc-backend \
@@ -551,23 +555,19 @@ gcloud certificate-manager certificates describe poc-cert
 ### 7-1. Serverless NEG 作成
 
 ```bash
-# フロントエンド用 NEG
+# フロントエンド用 NEG のみ作成（BFFパターン）
+# バックエンドはフロントエンド(Next.js)経由で内部通信するため NEG 不要
 gcloud compute network-endpoint-groups create poc-frontend-neg \
   --region=asia-northeast1 \
   --network-endpoint-type=serverless \
   --cloud-run-service=poc-frontend
-
-# バックエンド用 NEG
-gcloud compute network-endpoint-groups create poc-backend-neg \
-  --region=asia-northeast1 \
-  --network-endpoint-type=serverless \
-  --cloud-run-service=poc-backend
 ```
 
 ### 7-2. バックエンドサービス作成
 
 ```bash
-# フロントエンド用
+# フロントエンド用のみ（BFFパターン）
+# LB からはフロントエンドだけに振り分ける
 gcloud compute backend-services create poc-frontend-bs \
   --load-balancing-scheme=EXTERNAL_MANAGED \
   --global
@@ -576,40 +576,16 @@ gcloud compute backend-services add-backend poc-frontend-bs \
   --network-endpoint-group=poc-frontend-neg \
   --network-endpoint-group-region=asia-northeast1 \
   --global
-
-# バックエンド用
-gcloud compute backend-services create poc-backend-bs \
-  --load-balancing-scheme=EXTERNAL_MANAGED \
-  --global
-
-gcloud compute backend-services add-backend poc-backend-bs \
-  --network-endpoint-group=poc-backend-neg \
-  --network-endpoint-group-region=asia-northeast1 \
-  --global
 ```
 
 ### 7-3. URL マップ作成
 
 ```bash
-PROJECT_ID=$(gcloud config get-value project)
-
+# 全パスをフロントエンドに振り分け（BFFパターン）
+# /api/* へのリクエストも一度フロントエンド(Next.js)が受け取り、
+# Next.js API Route がバックエンド(FastAPI)に内部通信で中継する
 gcloud compute url-maps create poc-url-map \
   --default-service=poc-frontend-bs
-
-gcloud compute url-maps import poc-url-map --global << EOF
-defaultService: projects/${PROJECT_ID}/global/backendServices/poc-frontend-bs
-hostRules:
-- hosts:
-  - '*'
-  pathMatcher: poc-matcher
-pathMatchers:
-- name: poc-matcher
-  defaultService: projects/${PROJECT_ID}/global/backendServices/poc-frontend-bs
-  pathRules:
-  - paths:
-    - /api/*
-    service: projects/${PROJECT_ID}/global/backendServices/poc-backend-bs
-EOF
 ```
 
 > **注意:** ヒアドキュメントは `EOF`（クォートなし）で記述すること。
@@ -902,14 +878,11 @@ gcloud compute target-https-proxies delete poc-https-proxy -q
 # URL マップ
 gcloud compute url-maps delete poc-url-map --global -q
 
-# バックエンドサービス
+# バックエンドサービス（BFFパターンのためフロントエンドのみ）
 gcloud compute backend-services delete poc-frontend-bs --global -q
-gcloud compute backend-services delete poc-backend-bs --global -q
 
-# Serverless NEG
+# Serverless NEG（BFFパターンのためフロントエンドのみ）
 gcloud compute network-endpoint-groups delete poc-frontend-neg \
-  --region=asia-northeast1 -q
-gcloud compute network-endpoint-groups delete poc-backend-neg \
   --region=asia-northeast1 -q
 
 # 外部 IP アドレス（課金対象）

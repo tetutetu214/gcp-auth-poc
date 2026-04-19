@@ -107,10 +107,10 @@ PDFファイルをGCSにアップロードする。
 
 ### Cloud Run サービス
 
-| サービス | イメージ | ポート | ingress | max-instances | SA |
-| --- | --- | --- | --- | --- | --- |
-| poc-backend | backend:latest | 8080 | internal | 3 | poc-backend-sa |
-| poc-frontend | frontend:latest | 8080 | internal-and-cloud-load-balancing | 3 | poc-frontend-sa |
+| サービス | イメージ | ポート | ingress | max-instances | SA | 認証 |
+| --- | --- | --- | --- | --- | --- | --- |
+| poc-backend | backend:latest | 8080 | internal | 3 | poc-backend-sa | allow-unauthenticated（内部通信のみ） |
+| poc-frontend | frontend:latest | 8080 | internal-and-cloud-load-balancing | 3 | poc-frontend-sa | no-allow-unauthenticated（IAP経由） |
 
 ### サービスアカウント
 
@@ -133,7 +133,7 @@ PDFファイルをGCSにアップロードする。
 | --- | --- |
 | スキーム | EXTERNAL_MANAGED |
 | IPバージョン | IPv4（PREMIUM ネットワークティア） |
-| URLマップ | `/*` → poc-frontend-bs、`/api/*` → poc-backend-bs |
+| URLマップ | `/*` → poc-frontend-bs（BFFパターン：全パスをフロントエンドに振り分け） |
 | SSL | Googleマネージド証明書（DNS認証） |
 
 ### Artifact Registry
