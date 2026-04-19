@@ -76,6 +76,15 @@ gcloud services enable \
   certificatemanager.googleapis.com
 ```
 
+### 1-3. Private Google Access 有効化
+
+```bash
+# Cloud Run 間の内部通信に必要（Direct VPC egress 経由で Google サービスにアクセスするため）
+gcloud compute networks subnets update default \
+  --region=asia-northeast1 \
+  --enable-private-ip-google-access
+```
+
 ---
 
 ## Step2. GCS バケット作成
@@ -227,8 +236,12 @@ gcloud run deploy poc-backend \
   --set-env-vars=BUCKET_NAME=${BUCKET_NAME} \
   --ingress=internal \
   --max-instances=3 \
-  --no-allow-unauthenticated \
+  --allow-unauthenticated \
   --port=8080
+
+# ※ --allow-unauthenticated だが、--ingress=internal により
+#    外部からのアクセスは完全ブロックされる。
+#    フロントエンド(Next.js)からの内部通信のみ受け付ける（3層構成）。
 
 # バックエンドの URL を変数に保存
 BACKEND_URL=$(gcloud run services describe poc-backend \
@@ -468,9 +481,16 @@ gcloud run deploy poc-frontend \
   --service-account=poc-frontend-sa@${PROJECT_ID}.iam.gserviceaccount.com \
   --set-env-vars=BACKEND_URL=${BACKEND_URL} \
   --ingress=internal-and-cloud-load-balancing \
+  --network=default \
+  --subnet=default \
+  --vpc-egress=all-traffic \
   --max-instances=3 \
   --no-allow-unauthenticated \
   --port=8080
+
+# ※ --network/--subnet/--vpc-egress は Direct VPC egress の設定。
+#    バックエンド(ingress=internal)への内部通信に必要。
+#    Step1-3 で Private Google Access を有効化済みであること。
 ```
 
 ---
@@ -551,23 +571,19 @@ gcloud certificate-manager certificates describe poc-cert
 ### 7-1. Serverless NEG 作成
 
 ```bash
-# フロントエンド用 NEG
+# フロントエンド用 NEG のみ作成（3層構成）
+# バックエンドはフロントエンド(Next.js)経由で内部通信するため NEG 不要
 gcloud compute network-endpoint-groups create poc-frontend-neg \
   --region=asia-northeast1 \
   --network-endpoint-type=serverless \
   --cloud-run-service=poc-frontend
-
-# バックエンド用 NEG
-gcloud compute network-endpoint-groups create poc-backend-neg \
-  --region=asia-northeast1 \
-  --network-endpoint-type=serverless \
-  --cloud-run-service=poc-backend
 ```
 
 ### 7-2. バックエンドサービス作成
 
 ```bash
-# フロントエンド用
+# フロントエンド用のみ（3層構成）
+# LB からはフロントエンドだけに振り分ける
 gcloud compute backend-services create poc-frontend-bs \
   --load-balancing-scheme=EXTERNAL_MANAGED \
   --global
@@ -576,40 +592,16 @@ gcloud compute backend-services add-backend poc-frontend-bs \
   --network-endpoint-group=poc-frontend-neg \
   --network-endpoint-group-region=asia-northeast1 \
   --global
-
-# バックエンド用
-gcloud compute backend-services create poc-backend-bs \
-  --load-balancing-scheme=EXTERNAL_MANAGED \
-  --global
-
-gcloud compute backend-services add-backend poc-backend-bs \
-  --network-endpoint-group=poc-backend-neg \
-  --network-endpoint-group-region=asia-northeast1 \
-  --global
 ```
 
 ### 7-3. URL マップ作成
 
 ```bash
-PROJECT_ID=$(gcloud config get-value project)
-
+# 全パスをフロントエンドに振り分け（3層構成）
+# /api/* へのリクエストも一度フロントエンド(Next.js)が受け取り、
+# Next.js API Route がバックエンド(FastAPI)に内部通信で中継する
 gcloud compute url-maps create poc-url-map \
   --default-service=poc-frontend-bs
-
-gcloud compute url-maps import poc-url-map --global << EOF
-defaultService: projects/${PROJECT_ID}/global/backendServices/poc-frontend-bs
-hostRules:
-- hosts:
-  - '*'
-  pathMatcher: poc-matcher
-pathMatchers:
-- name: poc-matcher
-  defaultService: projects/${PROJECT_ID}/global/backendServices/poc-frontend-bs
-  pathRules:
-  - paths:
-    - /api/*
-    service: projects/${PROJECT_ID}/global/backendServices/poc-backend-bs
-EOF
 ```
 
 > **注意:** ヒアドキュメントは `EOF`（クォートなし）で記述すること。
@@ -738,12 +730,22 @@ curl -I https://poc.tetutetu214.com
 |---|---|
 | クライアントシークレットの値 | `ENTRA_CLIENT_SECRET` |
 
-### 8-5. ID トークン有効化
+### 8-5. Web プラットフォーム追加 + ID トークン有効化
 
 1. 左メニュー →「認証」
-2. 「暗黙的な許可およびハイブリッド フロー」セクション
-3. **「ID トークン（暗黙的およびハイブリッド フローに使用）」** にチェック
-4. 「保存」をクリック
+2. 「プラットフォームの構成」→「+ プラットフォームを追加」→「Web」を選択
+3. 以下を入力:
+
+| 項目 | 設定値 |
+|---|---|
+| リダイレクト URI | `https://localhost`（仮の値。Step11 で Identity Platform のコールバック URL に差し替える） |
+| フロントチャンネルのログアウト URL | 空欄のまま |
+
+4. 「暗黙的な許可およびハイブリッド フロー」セクションで **「ID トークン（暗黙的およびハイブリッド フローに使用）」** にチェック
+5. 「構成」をクリック
+
+> **注意:** Web プラットフォーム追加時はリダイレクト URI が必須入力。
+> 空欄では保存できないため、仮の値として `https://localhost` を設定する。
 
 ---
 
@@ -892,14 +894,11 @@ gcloud compute target-https-proxies delete poc-https-proxy -q
 # URL マップ
 gcloud compute url-maps delete poc-url-map --global -q
 
-# バックエンドサービス
+# バックエンドサービス（3層構成のためフロントエンドのみ）
 gcloud compute backend-services delete poc-frontend-bs --global -q
-gcloud compute backend-services delete poc-backend-bs --global -q
 
-# Serverless NEG
+# Serverless NEG（3層構成のためフロントエンドのみ）
 gcloud compute network-endpoint-groups delete poc-frontend-neg \
-  --region=asia-northeast1 -q
-gcloud compute network-endpoint-groups delete poc-backend-neg \
   --region=asia-northeast1 -q
 
 # 外部 IP アドレス（課金対象）
