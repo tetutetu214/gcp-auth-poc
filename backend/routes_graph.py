@@ -1,13 +1,20 @@
 """/api/graph/* のFastAPIルーター"""
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Header, Response
 from fastapi.responses import JSONResponse
 
 from config import AppConfig
-from firestore_tokens import load_token
-from oauth import generate_state, build_authorize_url
+from firestore_tokens import load_token, save_token
+from oauth import (
+    generate_state,
+    build_authorize_url,
+    refresh_access_token,
+)
+from graph_client import list_messages
+from gcs_writer import save_mails_to_gcs
 
 
 # state を一時的に保持するCookie名と有効期限（10分）
@@ -77,9 +84,41 @@ def build_router(deps: GraphDeps) -> APIRouter:
             )
             return response
 
-        # トークンあり：Task 9 で実装
+        # アクセストークンが失効間近ならリフレッシュ
+        if record.is_expired():
+            refreshed = await refresh_access_token(
+                tenant_id=deps.config.tenant_id,
+                client_id=deps.config.client_id,
+                client_secret=deps.config.client_secret,
+                refresh_token=record.refresh_token,
+            )
+            # Entra IDはrefresh_tokenを再発行する場合もしない場合もある
+            # 返ってこない場合は既存のrefresh_tokenを引き継ぐ
+            if not refreshed.refresh_token:
+                refreshed.refresh_token = record.refresh_token
+            save_token(deps.firestore_client, user_email, refreshed)
+            record = refreshed
+
+        # Graph APIから最新メールを10件取得
+        messages = await list_messages(
+            access_token=record.access_token, top=10
+        )
+
+        # GCSに保存
+        gcs_path = save_mails_to_gcs(
+            storage_client=deps.storage_client,
+            bucket_name=deps.config.bucket_name,
+            user_email=user_email,
+            messages=messages,
+            now=datetime.now(timezone.utc),
+        )
+
         return JSONResponse(
-            {"status": "ok", "count": 0, "gcs_path": ""}
+            {
+                "status": "ok",
+                "count": len(messages),
+                "gcs_path": gcs_path,
+            }
         )
 
     return router
