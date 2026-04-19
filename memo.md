@@ -7,6 +7,8 @@
 | バージョン | 変更内容 |
 |---|---|
 | v1 | 初版（個人環境向け統合版） |
+| v2 | 3層構成への変更を反映（LBからのパスルーティング廃止、Next.jsがバックエンドに中継）|
+| v3 | Phase 7（Graph APIメール取得・Secret Manager・Firestore）を追加 |
 
 ---
 
@@ -26,12 +28,42 @@ Cloud Load Balancing (External Application LB) + IAP
   │   ブラウザにクッキー保存 → 再アクセス
   │
   └─ クッキーあり（認証済み）
-        ↓ パスベースルーティング
-        ├── /*       → Cloud Run: poc-frontend (Next.js)
-        └── /api/*   → Cloud Run: poc-backend  (FastAPI)
-                          ↓
-                     Google Cloud Storage
+        ↓ LBは全パスをNext.jsに振り分け（3層構成）
+        ↓
+  Cloud Run: poc-frontend (Next.js)
+        │
+        │ Next.js API Route がプロキシとして
+        │ Direct VPC egress でバックエンドに内部通信
+        ↓
+  Cloud Run: poc-backend (FastAPI)
+        │
+        ├──【Phase 1〜6】PDFアップロード
+        │     ↓
+        │   Google Cloud Storage (uploads/)
+        │
+        └──【Phase 7】Microsoft Graph API メール取得
+              │
+              ├─ Secret Manager からクライアントシークレット取得
+              │   （Cloud Run の --set-secrets で環境変数化）
+              │
+              ├─ OAuth 2.0 Authorization Code Flow
+              │   ↓（同意 → 認可コード → トークン交換）
+              │  Microsoft Entra ID (/common エンドポイント)
+              │
+              ├─ トークン保管: Firestore (graph_tokens/)
+              │
+              └─ Microsoft Graph API /v1.0/me/messages
+                    ↓（メール10件）
+                  Google Cloud Storage (mails/{user}/...)
 ```
+
+> **Phase 7 のポイント**：IAP認証（AuthN）と Graph認可（AuthZ）は独立した2経路。
+> IAPは「誰か」を確認するだけで、Graph用のアクセストークンはIAPが飲み込んで
+> アプリには渡らない。そのためGraph用にアプリが独自にOAuthフローを走らせ、
+> 認可コードをトークンに交換してFirestoreに保管する。
+>
+> FastAPIの`ingress=internal`で外部からは直接触れないため、コールバックURLは
+> 必然的にNext.jsに着地し、そこからFastAPIへ内部通信で中継する設計。
 
 ---
 
@@ -47,6 +79,8 @@ Cloud Load Balancing (External Application LB) + IAP
 | フロントエンド | Next.js 14（App Router） |
 | バックエンド | FastAPI + Python 3.12 |
 | max-instances | 3（PoC用） |
+| **Phase 7 追加** | Secret Manager、Firestore (Native mode)、Microsoft Graph API |
+| **Phase 7 Entra ID** | マルチテナント＋個人Microsoftアカウント対応、`requestedAccessTokenVersion: 2` |
 
 ---
 
