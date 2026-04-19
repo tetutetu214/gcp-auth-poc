@@ -47,6 +47,13 @@ async def list_messages(
             params=params,
             headers=headers,
         )
+        if response.status_code >= 400:
+            # エラー時の本文をログ出力（診断用）
+            import logging
+            logging.getLogger("uvicorn.error").error(
+                f"Graph API error {response.status_code}: "
+                f"{response.text[:500]}"
+            )
         response.raise_for_status()
         body = response.json()
     messages: list[dict] = body.get("value", [])
