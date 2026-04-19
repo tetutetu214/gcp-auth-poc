@@ -66,6 +66,7 @@ def test_sync_fetches_mails_when_token_valid() -> None:
         "refresh_token": "RT",
         "expires_at": future,
         "scope": "Mail.Read",
+        "user_email": "user@example.com",
     }
     firestore.collection.return_value.document.return_value.get.return_value = snapshot
 

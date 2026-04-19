@@ -16,7 +16,7 @@ from oauth import (
     exchange_code_for_token,
     refresh_access_token,
 )
-from graph_client import get_me_email, list_messages
+from graph_client import list_messages
 from gcs_writer import save_mails_to_gcs
 
 
@@ -176,21 +176,16 @@ def build_router(deps: GraphDeps) -> APIRouter:
             save_token(deps.firestore_client, session_key, refreshed)
             record = refreshed
 
-        # Graph APIから /me でメールアドレス（GCSパス用）を取得
-        display_email = await get_me_email(
-            access_token=record.access_token
-        )
-
         # Graph APIから最新メールを10件取得
         messages = await list_messages(
             access_token=record.access_token, top=10
         )
 
-        # GCSに保存（パスには表示用の email を使う）
+        # GCSに保存（パスには id_token から得た user_email を使う）
         gcs_path = save_mails_to_gcs(
             storage_client=deps.storage_client,
             bucket_name=deps.config.bucket_name,
-            user_email=display_email or "unknown",
+            user_email=record.user_email or "unknown",
             messages=messages,
             now=datetime.now(timezone.utc),
         )
