@@ -83,16 +83,17 @@ def _resolve_user_email(
 
 
 def _extract_iap_uid(iap_cookie: str | None) -> str:
-    """GCP_IAP_UID Cookie の値から安定した UID を取り出す
+    """GCP_IAP_UID Cookie の値から Firestore ドキュメントIDとして使える文字列を作る
 
     外部ID（Identity Platform）利用時、IAPは
       GCP_IAP_UID=securetoken.google.com/{PROJECT_ID}:{USER_UID}
-    の形でCookieに情報を入れてくる。URLデコード後の生値をそのまま
-    Firestoreキーとして使う（: が含まれるがFirestoreは許容）。
+    の形でCookieに情報を入れてくる。
+    Firestore のドキュメントIDに `/` は使えない（パス区切りとして解釈される）ため、
+    `/` を `_` に置換してサニタイズする。
     """
     if not iap_cookie:
         return ""
-    return iap_cookie
+    return iap_cookie.replace("/", "_")
 
 
 def _session_key(
