@@ -16,13 +16,16 @@ from oauth import (
     exchange_code_for_token,
     refresh_access_token,
 )
-from graph_client import list_messages
+from graph_client import get_me_email, list_messages
 from gcs_writer import save_mails_to_gcs
 
 
 # state を一時的に保持するCookie名と有効期限（10分）
 STATE_COOKIE_NAME = "graph_oauth_state"
 STATE_COOKIE_MAX_AGE = 600
+
+# IAP が外部IDで発行するセッションCookie名
+IAP_UID_COOKIE_NAME = "GCP_IAP_UID"
 
 
 @dataclass
@@ -79,22 +82,56 @@ def _resolve_user_email(
     return _extract_email_from_iap_jwt(jwt_header)
 
 
+def _extract_iap_uid(iap_cookie: str | None) -> str:
+    """GCP_IAP_UID Cookie の値から安定した UID を取り出す
+
+    外部ID（Identity Platform）利用時、IAPは
+      GCP_IAP_UID=securetoken.google.com/{PROJECT_ID}:{USER_UID}
+    の形でCookieに情報を入れてくる。URLデコード後の生値をそのまま
+    Firestoreキーとして使う（: が含まれるがFirestoreは許容）。
+    """
+    if not iap_cookie:
+        return ""
+    return iap_cookie
+
+
+def _session_key(
+    email_header: str | None,
+    jwt_header: str | None,
+    iap_uid_cookie: str | None,
+) -> str:
+    """Firestoreキーとして使う安定した識別子を返す
+
+    優先順位:
+      1. X-Goog-Authenticated-User-Email ヘッダ（Google内部ID）
+      2. X-Goog-IAP-JWT-Assertion の email クレーム
+      3. GCP_IAP_UID Cookie 値（外部ID利用時の最後の砦）
+    """
+    email = _resolve_user_email(email_header, jwt_header)
+    if email:
+        return email
+    return _extract_iap_uid(iap_uid_cookie)
+
+
 def build_router(deps: GraphDeps) -> APIRouter:
     """GraphDepsを束縛したAPIRouterを返す"""
     router = APIRouter()
 
     @router.get("/api/graph/sync")
     async def sync(
+        request: Request,
         x_goog_authenticated_user_email: str | None = Header(default=None),
         x_goog_iap_jwt_assertion: str | None = Header(default=None),
     ) -> Response:
-        user_email = _resolve_user_email(
+        iap_uid_cookie = request.cookies.get(IAP_UID_COOKIE_NAME)
+        session_key = _session_key(
             x_goog_authenticated_user_email,
             x_goog_iap_jwt_assertion,
+            iap_uid_cookie,
         )
         record = (
-            load_token(deps.firestore_client, user_email)
-            if user_email
+            load_token(deps.firestore_client, session_key)
+            if session_key
             else None
         )
 
@@ -135,19 +172,24 @@ def build_router(deps: GraphDeps) -> APIRouter:
             # 返ってこない場合は既存のrefresh_tokenを引き継ぐ
             if not refreshed.refresh_token:
                 refreshed.refresh_token = record.refresh_token
-            save_token(deps.firestore_client, user_email, refreshed)
+            save_token(deps.firestore_client, session_key, refreshed)
             record = refreshed
+
+        # Graph APIから /me でメールアドレス（GCSパス用）を取得
+        display_email = await get_me_email(
+            access_token=record.access_token
+        )
 
         # Graph APIから最新メールを10件取得
         messages = await list_messages(
             access_token=record.access_token, top=10
         )
 
-        # GCSに保存
+        # GCSに保存（パスには表示用の email を使う）
         gcs_path = save_mails_to_gcs(
             storage_client=deps.storage_client,
             bucket_name=deps.config.bucket_name,
-            user_email=user_email,
+            user_email=display_email or "unknown",
             messages=messages,
             now=datetime.now(timezone.utc),
         )
@@ -171,9 +213,11 @@ def build_router(deps: GraphDeps) -> APIRouter:
         x_goog_iap_jwt_assertion: str | None = Header(default=None),
     ) -> Response:
         """Entra IDからの認可コールバック。state検証→トークン交換→Firestore保存"""
-        user_email = _resolve_user_email(
+        iap_uid_cookie = request.cookies.get(IAP_UID_COOKIE_NAME)
+        session_key = _session_key(
             x_goog_authenticated_user_email,
             x_goog_iap_jwt_assertion,
+            iap_uid_cookie,
         )
         cookie_state = request.cookies.get(STATE_COOKIE_NAME)
 
@@ -189,6 +233,12 @@ def build_router(deps: GraphDeps) -> APIRouter:
                 status_code=400,
             )
 
+        if not session_key:
+            return JSONResponse(
+                {"detail": "ユーザー識別に失敗しました"},
+                status_code=500,
+            )
+
         # 認可コード → トークン交換
         record = await exchange_code_for_token(
             tenant_id=deps.config.tenant_id,
@@ -197,7 +247,7 @@ def build_router(deps: GraphDeps) -> APIRouter:
             code=code,
             redirect_uri=deps.config.redirect_uri,
         )
-        save_token(deps.firestore_client, user_email, record)
+        save_token(deps.firestore_client, session_key, record)
 
         # 元のページへリダイレクト。使い終わったstate Cookieを削除
         response = RedirectResponse(url="/", status_code=302)

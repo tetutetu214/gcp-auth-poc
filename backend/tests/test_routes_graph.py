@@ -87,6 +87,13 @@ def test_sync_fetches_mails_when_token_valid() -> None:
         assert_all_mocked=False,
         assert_all_called=False,
     ) as graph_mock:
+        # /me は GCSパス用のメールアドレス取得のためモック
+        graph_mock.get("/v1.0/me").respond(
+            json={
+                "mail": "user@example.com",
+                "userPrincipalName": "user@example.com",
+            }
+        )
         graph_mock.get("/v1.0/me/messages").respond(
             json={
                 "value": [
@@ -147,6 +154,12 @@ def test_sync_refreshes_expired_token() -> None:
                 "refresh_token": "NEW_RT",
                 "expires_in": 3600,
                 "scope": "Mail.Read",
+            }
+        )
+        mocker.get("https://graph.microsoft.com/v1.0/me").respond(
+            json={
+                "mail": "user@example.com",
+                "userPrincipalName": "user@example.com",
             }
         )
         mocker.get(

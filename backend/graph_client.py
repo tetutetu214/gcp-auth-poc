@@ -1,10 +1,30 @@
-"""Microsoft Graph API クライアント（/me/messages用）"""
+"""Microsoft Graph API クライアント"""
 import httpx
 
+ME_ENDPOINT = "https://graph.microsoft.com/v1.0/me"
 MESSAGES_ENDPOINT = "https://graph.microsoft.com/v1.0/me/messages"
 
 # 取得するフィールド。bodyは含めずプレビューのみ（通信量削減）
 SELECT_FIELDS = "subject,from,receivedDateTime,bodyPreview"
+
+
+async def get_me_email(access_token: str) -> str:
+    """Graph API /me を叩いてユーザーのメールアドレスを取得"""
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Accept": "application/json",
+    }
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        response = await client.get(
+            ME_ENDPOINT,
+            params={"$select": "mail,userPrincipalName"},
+            headers=headers,
+        )
+        response.raise_for_status()
+        body = response.json()
+    # mail が null の場合は userPrincipalName を使う（組織アカウントの挙動）
+    email = body.get("mail") or body.get("userPrincipalName") or ""
+    return email
 
 
 async def list_messages(
