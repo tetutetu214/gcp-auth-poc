@@ -3,14 +3,15 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Header, Response
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Header, Request, Response
+from fastapi.responses import JSONResponse, RedirectResponse
 
 from config import AppConfig
 from firestore_tokens import load_token, save_token
 from oauth import (
     generate_state,
     build_authorize_url,
+    exchange_code_for_token,
     refresh_access_token,
 )
 from graph_client import list_messages
@@ -120,5 +121,47 @@ def build_router(deps: GraphDeps) -> APIRouter:
                 "gcs_path": gcs_path,
             }
         )
+
+    @router.get("/api/graph/callback")
+    async def callback(
+        request: Request,
+        code: str | None = None,
+        state: str | None = None,
+        x_goog_authenticated_user_email: str | None = Header(
+            default=None
+        ),
+    ) -> Response:
+        """Entra IDからの認可コールバック。state検証→トークン交換→Firestore保存"""
+        user_email = _extract_user_email(
+            x_goog_authenticated_user_email
+        )
+        cookie_state = request.cookies.get(STATE_COOKIE_NAME)
+
+        # state検証（CSRF対策）
+        if (
+            not code
+            or not state
+            or not cookie_state
+            or state != cookie_state
+        ):
+            return JSONResponse(
+                {"detail": "state検証に失敗しました"},
+                status_code=400,
+            )
+
+        # 認可コード → トークン交換
+        record = await exchange_code_for_token(
+            tenant_id=deps.config.tenant_id,
+            client_id=deps.config.client_id,
+            client_secret=deps.config.client_secret,
+            code=code,
+            redirect_uri=deps.config.redirect_uri,
+        )
+        save_token(deps.firestore_client, user_email, record)
+
+        # 元のページへリダイレクト。使い終わったstate Cookieを削除
+        response = RedirectResponse(url="/", status_code=302)
+        response.delete_cookie(STATE_COOKIE_NAME)
+        return response
 
     return router

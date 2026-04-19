@@ -164,3 +164,76 @@ def test_sync_refreshes_expired_token() -> None:
     body = response.json()
     assert body["status"] == "ok"
     assert body["count"] == 1
+
+
+def test_callback_exchanges_code_and_saves_token() -> None:
+    """stateが一致した場合、codeをトークンに交換してFirestoreに保存する"""
+    firestore = MagicMock()
+    storage = MagicMock()
+    deps = GraphDeps(
+        config=_base_config(),
+        firestore_client=firestore,
+        storage_client=storage,
+    )
+
+    with respx.mock(
+        assert_all_mocked=False, assert_all_called=False
+    ) as mocker:
+        mocker.post(
+            "https://login.microsoftonline.com/tid/oauth2/v2.0/token"
+        ).respond(
+            json={
+                "access_token": "AT",
+                "refresh_token": "RT",
+                "expires_in": 3600,
+                "scope": "openid Mail.Read",
+            }
+        )
+
+        client = TestClient(_make_app(deps))
+        headers = {
+            "X-Goog-Authenticated-User-Email":
+                "accounts.google.com:user@example.com"
+        }
+        client.cookies.set("graph_oauth_state", "ABC")
+
+        response = client.get(
+            "/api/graph/callback?code=CODE&state=ABC",
+            headers=headers,
+            follow_redirects=False,
+        )
+
+    # 成功時は / にリダイレクトさせる
+    assert response.status_code == 302
+    assert response.headers["location"] == "/"
+
+    # Firestoreにsetが呼ばれた
+    doc_ref = firestore.collection.return_value.document.return_value
+    doc_ref.set.assert_called_once()
+    saved = doc_ref.set.call_args[0][0]
+    assert saved["access_token"] == "AT"
+
+
+def test_callback_rejects_mismatched_state() -> None:
+    """state不一致なら400"""
+    firestore = MagicMock()
+    storage = MagicMock()
+    deps = GraphDeps(
+        config=_base_config(),
+        firestore_client=firestore,
+        storage_client=storage,
+    )
+
+    client = TestClient(_make_app(deps))
+    client.cookies.set("graph_oauth_state", "COOKIE_STATE")
+    headers = {
+        "X-Goog-Authenticated-User-Email":
+            "accounts.google.com:user@example.com"
+    }
+
+    response = client.get(
+        "/api/graph/callback?code=CODE&state=DIFFERENT",
+        headers=headers,
+    )
+
+    assert response.status_code == 400
