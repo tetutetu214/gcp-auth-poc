@@ -12,6 +12,7 @@ venv/
 node_modules/
 .next/
 out/
+tsconfig.tsbuildinfo
 
 # 環境変数・シークレット
 .env
